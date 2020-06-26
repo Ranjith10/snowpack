@@ -16,6 +16,7 @@ import validatePackageName from 'validate-npm-package-name';
 import {EnvVarReplacements, SnowpackConfig, SnowpackSourceFile} from '../config.js';
 import {resolveTargetsFromRemoteCDN} from '../resolve-remote.js';
 import {rollupPluginCatchUnresolved} from '../rollup-plugin-catch-unresolved.js';
+import {rollupPluginCatchFetch} from '../rollup-plugin-catch-fetch';
 import {rollupPluginCss} from '../rollup-plugin-css';
 import {rollupPluginEntrypointAlias} from '../rollup-plugin-entrypoint-alias.js';
 import {rollupPluginDependencyCache} from '../rollup-plugin-remote-cdn.js';
@@ -385,6 +386,7 @@ export async function install(
           replacement: mod,
         })),
       }),
+      rollupPluginCatchFetch(),
       rollupPluginNodeResolve({
         mainFields: ['browser:module', 'module', 'browser', 'main'].filter(isTruthy),
         extensions: ['.mjs', '.cjs', '.js', '.json'], // Default: [ '.mjs', '.js', '.json', '.node' ]
