@@ -44,7 +44,7 @@ import onProcessExit from 'signal-exit';
 import stream from 'stream';
 import url from 'url';
 import zlib from 'zlib';
-import {BuildScript, SnowpackPluginBuildResult} from '../config';
+import {BuildResult} from '../config';
 import {EsmHmrEngine} from '../hmr-server-engine';
 import {
   scanCodeImportsExports,
@@ -65,9 +65,7 @@ import {
   parsePackageImportSpecifier,
 } from '../util';
 import {
-  FileBuilder,
   generateEnvModule,
-  getFileBuilderForWorker,
   wrapCssModuleResponse,
   wrapEsmProxyResponse,
   wrapHtmlResponse,
@@ -175,11 +173,6 @@ function getUrlFromFile(mountedDirectories: [string, string][], fileLoc: string)
   return null;
 }
 
-function getMountedDirectory(cwd: string, workerConfig: BuildScript): [string, string] {
-  const {args} = workerConfig;
-  return [path.resolve(cwd, args.fromDisk), args.toUrl];
-}
-
 let currentlyRunningCommand: any = null;
 
 export async function command(commandOptions: CommandOptions) {
@@ -195,7 +188,7 @@ export async function command(commandOptions: CommandOptions) {
   const inMemoryBuildCache = new Map<string, Buffer>();
   const inMemoryResourceCache = new Map<string, string>();
   const filesBeingDeleted = new Set<string>();
-  const filesBeingBuilt = new Map<string, Promise<SnowpackPluginBuildResult>>();
+  const filesBeingBuilt = new Map<string, Promise<BuildResult>>();
   const messageBus = new EventEmitter();
   const mountedDirectories: [string, string][] = [];
 
@@ -212,7 +205,7 @@ export async function command(commandOptions: CommandOptions) {
   // Start painting immediately, so we can surface errors & warnings to the
   // user, and they can watch the server starting up. Search for ”SERVER_START”
   // for the actual start event below.
-  paint(messageBus, config.scripts, undefined, {
+  paint(messageBus, Object.keys(config.scripts), undefined, {
     addPackage: async (pkgName: string) => {
       isLiveReloadPaused = true;
       messageBus.emit('INSTALLING');

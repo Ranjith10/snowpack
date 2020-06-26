@@ -9,8 +9,8 @@ import fs from 'fs';
 import got, {CancelableRequest, Response} from 'got';
 import open from 'open';
 import path from 'path';
-import {SnowpackConfig, BuildScript} from './config';
 import mkdirp from 'mkdirp';
+import {SnowpackConfig, BuildScript} from './config';
 
 export const PIKA_CDN = `https://cdn.pika.dev`;
 export const GLOBAL_CACHE_DIR = globalCacheDir('snowpack');

@@ -1,13 +1,5 @@
 import type CSSModuleLoader from 'css-modules-loader-core';
-import type {EventEmitter} from 'events';
-import execa from 'execa';
-import npmRunPath from 'npm-run-path';
-import {
-  BuildScript,
-  SnowpackConfig,
-  SnowpackPluginBuildArgs,
-  SnowpackPluginBuildResult,
-} from '../config';
+import {SnowpackConfig} from '../config';
 
 const IS_PREACT = /from\s+['"]preact['"]/;
 export function checkIsPreact(filePath: string, contents: string) {
@@ -152,53 +144,6 @@ document.head.appendChild(styleEl);`;
   }
 
   return `export default ${JSON.stringify(url)};`;
-}
-
-export type FileBuilder = (
-  args: SnowpackPluginBuildArgs,
-) => null | SnowpackPluginBuildResult | Promise<null | SnowpackPluginBuildResult>;
-export function getFileBuilderForWorker(
-  cwd: string,
-  selectedWorker: BuildScript,
-  messageBus: EventEmitter,
-): FileBuilder | undefined {
-  const {id, type, cmd, plugin} = selectedWorker;
-  if (type !== 'build') {
-    throw new Error(`scripts[${id}] is not a build script.`);
-  }
-  if (plugin?.build) {
-    const buildFn = plugin.build;
-    return async (args: SnowpackPluginBuildArgs) => {
-      try {
-        const result = await buildFn(args);
-        return result;
-      } catch (err) {
-        messageBus.emit('WORKER_MSG', {id, level: 'error', msg: err.message});
-        messageBus.emit('WORKER_UPDATE', {id, state: ['ERROR', 'red']});
-        return null;
-      }
-    };
-  }
-  return async ({contents, filePath}: SnowpackPluginBuildArgs) => {
-    let cmdWithFile = cmd.replace('$FILE', filePath);
-    try {
-      const {stdout, stderr} = await execa.command(cmdWithFile, {
-        env: npmRunPath.env(),
-        extendEnv: true,
-        shell: true,
-        input: contents,
-        cwd,
-      });
-      if (stderr) {
-        messageBus.emit('WORKER_MSG', {id, level: 'warn', msg: `${filePath}\n${stderr}`});
-      }
-      return {result: stdout};
-    } catch (err) {
-      messageBus.emit('WORKER_MSG', {id, level: 'error', msg: `${filePath}\n${err.stderr}`});
-      messageBus.emit('WORKER_UPDATE', {id, state: ['ERROR', 'red']});
-      return null;
-    }
-  };
 }
 
 const PUBLIC_ENV_REGEX = /^SNOWPACK_PUBLIC_/;

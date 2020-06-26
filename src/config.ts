@@ -7,20 +7,9 @@ import * as colors from 'kleur/colors';
 import path from 'path';
 import {Plugin as RollupPlugin} from 'rollup';
 import yargs from 'yargs-parser';
-import {esbuildPlugin} from './commands/esbuildPlugin';
-import {DEV_DEPENDENCIES_DIR} from './util';
 
 const CONFIG_NAME = 'snowpack';
 const ALWAYS_EXCLUDE = ['**/node_modules/**/*', '**/.types/**/*'];
-const SCRIPT_TYPES_WEIGHTED = {
-  proxy: 1,
-  mount: 2,
-  run: 3,
-  build: 4,
-  bundle: 100,
-} as {[type in ScriptType]: number};
-
-type ScriptType = 'mount' | 'run' | 'build' | 'bundle';
 
 type DeepPartial<T> = {
   [P in keyof T]?: T[P] extends Array<infer U>
@@ -46,55 +35,57 @@ export interface SnowpackSourceFile {
   /** if no location on disk, assume this exists in memory */
   locOnDisk?: string;
 }
-export type SnowpackPluginBuildArgs = {
-  contents: string;
-  filePath: string;
-  isDev: boolean;
-};
-export type SnowpackPluginTransformArgs = {
-  contents: string;
-  urlPath: string;
-  isDev: boolean;
-};
-export type SnowpackPluginBuildResult = {
-  result: string;
-  resources?: {css?: string};
-};
-export type SnowpackPluginTransformResult = {
-  result: string;
-  resources?: {css?: string};
-};
-export type SnowpackPlugin = {
-  defaultBuildScript?: string;
-  knownEntrypoints?: string[];
-  build?: (
-    args: SnowpackPluginBuildArgs,
-  ) => null | SnowpackPluginBuildResult | Promise<null | SnowpackPluginBuildResult>;
-  transform?: (
-    args: SnowpackPluginTransformArgs,
-  ) => null | SnowpackPluginTransformResult | Promise<null | SnowpackPluginTransformResult>;
-  bundle?(args: {
-    srcDirectory: string;
-    destDirectory: string;
-    jsFilePaths: Set<string>;
-    log: (msg) => void;
-  }): Promise<void>;
-};
-export type BuildScript = {
-  id: string;
-  match: string[];
-  type: ScriptType;
-  cmd: string;
-  watch?: string;
-  plugin?: SnowpackPlugin;
-  args?: any;
-};
 
 export type ProxyOptions = HttpProxy.ServerOptions & {
   // Custom on: {} event handlers
   on: Record<string, Function>;
 };
 export type Proxy = [string, ProxyOptions];
+
+export interface BuildOptions {
+  code: string;
+  contents?: string; // deprecated in favor of “code“
+  filePath: string;
+  isDev: boolean;
+}
+
+/** DEPRECATED */
+export type __OldBuildResult = {result: string; resources?: {css?: string}};
+
+/** map of extensions -> code (e.g. { ".js": "[code]", ".css": "[code]" }) */
+export type BuildResult = string | {[fileExtension: string]: string} | __OldBuildResult;
+
+export interface BundleOptions {
+  srcDirectory: string;
+  destDirectory: string;
+  jsFilePaths: Set<string>;
+  log: (msg, level?: 'INFO' | 'WARN' | 'ERROR') => void;
+}
+
+export interface __OldTransformOptions {
+  contents: string;
+  urlPath: string;
+  isDev: boolean;
+}
+
+export interface SnowpackPlugin {
+  /** name of the plugin */
+  name: string;
+  /** file extensions this plugin takes as input (e.g. [".jsx", ".js", …]) */
+  input: string | string[];
+  /** file extensions this plugin outputs (e.g. [".js", ".css"]) */
+  output: string | string[];
+  /** transform input to output */
+  build?(BuildOptions): Promise<BuildResult>;
+  /** bundle  */
+  bundle?(BundleOptions): Promise<void>;
+  /** DEPRECATED */
+  transform?(__OldTransformOptions): Promise<__OldBuildResult>;
+  /** DEPRECATED */
+  defaultBuildScript?: string;
+  /** DEPRECATED */
+  knownEntrypoints?: string[];
+}
 
 // interface this library uses internally
 export interface SnowpackConfig {
@@ -103,8 +94,8 @@ export interface SnowpackConfig {
   exclude: string[];
   knownEntrypoints: string[];
   webDependencies?: {[packageName: string]: string};
-  scripts: BuildScript[];
-  plugins: SnowpackPlugin[];
+  scripts: Record<string, string>;
+  plugins: ([string, any] | string)[];
   devOptions: {
     secure: boolean;
     port: number;
@@ -328,120 +319,6 @@ function handleLegacyProxyScripts(config: any) {
   return config;
 }
 
-type RawScripts = Record<string, string>;
-function normalizeScripts(scripts: RawScripts): BuildScript[] {
-  function prefixDot(file: string): string {
-    return `.${file}`.replace(/^\.+/, '.'); // prefix with dot, and make sure only one sticks
-  }
-
-  const processedScripts: BuildScript[] = [];
-  if (Object.keys(scripts).filter((k) => k.startsWith('bundle:')).length > 1) {
-    handleConfigError(`scripts can only contain 1 script of type "bundle:".`);
-  }
-  for (const scriptId of Object.keys(scripts)) {
-    if (scriptId.includes('::watch')) {
-      continue;
-    }
-    const [scriptType, scriptMatch] = scriptId.split(':') as [ScriptType, string];
-    if (!SCRIPT_TYPES_WEIGHTED[scriptType]) {
-      handleConfigError(`scripts[${scriptId}]: "${scriptType}" is not a known script type.`);
-    }
-    const cmd = (scripts[scriptId] as any) as string;
-    const newScriptConfig: BuildScript = {
-      id: scriptId,
-      type: scriptType,
-      match: scriptMatch.split(',').map(prefixDot),
-      cmd,
-      watch: (scripts[`${scriptId}::watch`] as any) as string | undefined,
-    };
-    if (newScriptConfig.watch) {
-      newScriptConfig.watch = newScriptConfig.watch.replace('$1', newScriptConfig.cmd);
-    }
-    if (scriptType === 'mount') {
-      const cmdArr = cmd.split(/\s+/);
-      if (cmdArr[0] !== 'mount') {
-        handleConfigError(`scripts[${scriptId}] must use the mount command`);
-      }
-      cmdArr.shift();
-      const {to, _} = yargs(cmdArr);
-      if (_.length !== 1) {
-        handleConfigError(`scripts[${scriptId}] must use the format: "mount dir [--to /PATH]"`);
-      }
-      if (to && to[0] !== '/') {
-        handleConfigError(
-          `scripts[${scriptId}]: "--to ${to}" must be a URL path, and start with a "/"`,
-        );
-      }
-      let dirDisk = cmdArr[0];
-      const dirUrl = to || `/${cmdArr[0]}`;
-
-      // mount:web_modules is a special case script where the fromDisk
-      // arg is hard-coded to match the internal dependency directory.
-      if (scriptId === 'mount:web_modules') {
-        dirDisk = DEV_DEPENDENCIES_DIR;
-      }
-
-      newScriptConfig.args = {
-        fromDisk: path.posix.normalize(dirDisk + '/'),
-        toUrl: path.posix.normalize(dirUrl + '/'),
-      };
-    }
-    processedScripts.push(newScriptConfig);
-  }
-  const allBuildMatch = new Set<string>();
-  for (const {type, match} of processedScripts) {
-    if (type !== 'build') {
-      continue;
-    }
-    for (const ext of match) {
-      if (allBuildMatch.has(ext)) {
-        handleConfigError(
-          `Multiple "scripts" match the "${ext}" file extension.\nCurrently, only one script per file type is supported.`,
-        );
-      }
-      allBuildMatch.add(prefixDot(ext));
-    }
-  }
-
-  if (!scripts['mount:web_modules']) {
-    processedScripts.push({
-      id: 'mount:web_modules',
-      type: 'mount',
-      match: ['web_modules'],
-      cmd: `mount $WEB_MODULES --to /web_modules`,
-      args: {
-        fromDisk: DEV_DEPENDENCIES_DIR,
-        toUrl: '/web_modules',
-      },
-    });
-  }
-
-  const defaultBuildMatch = ['.js', '.jsx', '.ts', '.tsx'].filter((ext) => !allBuildMatch.has(ext));
-  if (defaultBuildMatch.length > 0) {
-    const defaultBuildWorkerConfig = {
-      id: `build:${defaultBuildMatch.join(',')}`,
-      type: 'build',
-      match: defaultBuildMatch,
-      cmd: '(default) esbuild',
-      plugin: esbuildPlugin(),
-    } as BuildScript;
-    processedScripts.push(defaultBuildWorkerConfig);
-  }
-  processedScripts.sort((a, b) => {
-    if (a.type === b.type) {
-      if (a.id === 'mount:web_modules') {
-        return -1;
-      }
-      if (b.id === 'mount:web_modules') {
-        return 1;
-      }
-      return a.id.localeCompare(b.id);
-    }
-    return SCRIPT_TYPES_WEIGHTED[a.type] - SCRIPT_TYPES_WEIGHTED[b.type];
-  });
-  return processedScripts;
-}
-
 type RawProxies = Record<string, string | ProxyOptions>;
 function normalizeProxies(proxies: RawProxies): Proxy[] {
   return Object.entries(proxies).map(([pathPrefix, options]) => {
@@ -479,72 +356,22 @@ function normalizeConfig(config: SnowpackConfig): SnowpackConfig {
   config.installOptions.dest = path.resolve(cwd, config.installOptions.dest);
   config.devOptions.out = path.resolve(cwd, config.devOptions.out);
   config.exclude = Array.from(new Set([...ALWAYS_EXCLUDE, ...config.exclude]));
-  if (!config.scripts) {
-    config.exclude.push('**/.*');
-    config.scripts = {
-      'mount:*': 'mount . --to /',
-    } as any;
-  }
+
   if (!config.proxy) {
     config.proxy = {} as any;
   }
-  const allPlugins = {};
+
   // remove leading/trailing slashes
   config.buildOptions.metaDir = config.buildOptions.metaDir
     .replace(/^(\/|\\)/g, '') // replace leading slash
     .replace(/(\/|\\)$/g, ''); // replace trailing slash
-  config.plugins = (config.plugins as any).map((plugin: string | [string, any]) => {
-    const configPluginPath = Array.isArray(plugin) ? plugin[0] : plugin;
-    const configPluginOptions = (Array.isArray(plugin) && plugin[1]) || {};
-    const configPluginLoc = require.resolve(configPluginPath, {paths: [cwd]});
-    const configPlugin = require(configPluginLoc)(config, configPluginOptions);
-    if (
-      (configPlugin.build ? 1 : 0) +
-        (configPlugin.transform ? 1 : 0) +
-        (configPlugin.bundle ? 1 : 0) >
-      1
-    ) {
-      handleConfigError(
-        `plugin[${configPluginLoc}]: A valid plugin can only have one build(), transform(), or bundle() function.`,
-      );
-    }
-    allPlugins[configPluginPath] = configPlugin;
-    if (configPlugin.knownEntrypoints) {
-      config.knownEntrypoints.push(...configPlugin.knownEntrypoints);
-    }
-    if (
-      configPlugin.defaultBuildScript &&
-      !(config.scripts as any)[configPlugin.defaultBuildScript] &&
-      !Object.values(config.scripts as any).includes(configPluginPath)
-    ) {
-      (config.scripts as any)[configPlugin.defaultBuildScript] = configPluginPath;
-    }
-    return configPlugin;
-  });
+
   if (config.devOptions.bundle === true && !config.scripts['bundle:*']) {
     handleConfigError(`--bundle set to true, but no "bundle:*" script/plugin was provided.`);
   }
+
   config = handleLegacyProxyScripts(config);
   config.proxy = normalizeProxies(config.proxy as any);
-  config.scripts = normalizeScripts(config.scripts as any);
-  config.scripts.forEach((script: BuildScript) => {
-    if (script.plugin) return;
-
-    // Ensure plugins are properly registered/configured
-    if (['build', 'bundle'].includes(script.type)) {
-      if (allPlugins[script.cmd]?.[script.type]) {
-        script.plugin = allPlugins[script.cmd];
-      } else if (allPlugins[script.cmd] && !allPlugins[script.cmd][script.type]) {
-        handleConfigError(
-          `scripts[${script.id}]: Plugin "${script.cmd}" has no ${script.type} script.`,
-        );
-      } else if (script.cmd.startsWith('@') || script.cmd.startsWith('.')) {
-        handleConfigError(
-          `scripts[${script.id}]: Register plugin "${script.cmd}" in your Snowpack "plugins" config.`,
-        );
-      }
-    }
-  });
 
   return config;
 }
